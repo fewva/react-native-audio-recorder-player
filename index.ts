@@ -34,6 +34,7 @@ export enum OutputFormatAndroidType {
   OUTPUT_FORMAT_RTP_AVP,
   MPEG_2_TS,
   WEBM,
+  MP3 = 300,
 }
 
 export enum AudioEncoderAndroidType {
@@ -56,6 +57,7 @@ export enum AVEncodingOption {
   alaw = 'alaw',
   mp1 = 'mp1',
   mp2 = 'mp2',
+  mp3 = 'mp3',
   mp4 = 'mp4',
   alac = 'alac',
   amr = 'amr',
@@ -74,6 +76,7 @@ type AVEncodingType =
   | AVEncodingOption.mp1
   | AVEncodingOption.mp2
   | AVEncodingOption.mp4
+  | AVEncodingOption.mp3
   | AVEncodingOption.alac
   | AVEncodingOption.amr
   | AVEncodingOption.flac
@@ -105,7 +108,7 @@ export enum AVEncoderAudioQualityIOSType {
   low = 32,
   medium = 64,
   high = 96,
-  max = 127,
+  max = 128,
 }
 
 export enum AVLinearPCMBitDepthKeyIOSType {

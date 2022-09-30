@@ -63,5 +63,6 @@ dependencies {
     def androidXBrowser = safeExtGet('androidXBrowser', androidXVersion)
     implementation "androidx.annotation:annotation:$androidXAnnotation"
     implementation "androidx.browser:browser:$androidXBrowser"
+    implementation 'com.github.naman14:TAndroidLame:1.1'
   }
 }

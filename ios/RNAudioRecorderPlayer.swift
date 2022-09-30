@@ -7,6 +7,7 @@
 
 import Foundation
 import AVFoundation
+import lame
 
 @objc(RNAudioRecorderPlayer)
 class RNAudioRecorderPlayer: RCTEventEmitter, AVAudioRecorderDelegate {
@@ -18,6 +19,15 @@ class RNAudioRecorderPlayer: RCTEventEmitter, AVAudioRecorderDelegate {
     var audioSession: AVAudioSession!
     var recordTimer: Timer?
     var _meteringEnabled: Bool = false
+    
+    // mp3
+    var isMP3Active = false
+    var filePathMP3: String? = nil
+    var outref: ExtAudioFileRef?
+    var audioEngine: AVAudioEngine!
+    var mixer: AVAudioMixerNode!
+    var meterLevel: Float = 0
+    var startTime: Date?
 
     // Player
     var pausedPlayTime: CMTime?
@@ -35,10 +45,10 @@ class RNAudioRecorderPlayer: RCTEventEmitter, AVAudioRecorderDelegate {
         return ["rn-playback", "rn-recordback"]
     }
 
-    func setAudioFileURL(path: String) {
+    func setAudioFileURL(path: String, isMp3: Bool) {
         if (path == "DEFAULT") {
             let cachesDirectory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
-            audioFileURL = cachesDirectory.appendingPathComponent("sound.m4a")
+            audioFileURL = isMp3 ? cachesDirectory.appendingPathComponent("sound.mp3") : cachesDirectory.appendingPathComponent("sound.m4a")
         } else if (path.hasPrefix("http://") || path.hasPrefix("https://") || path.hasPrefix("file://")) {
             audioFileURL = URL(string: path)
         } else {
@@ -51,17 +61,21 @@ class RNAudioRecorderPlayer: RCTEventEmitter, AVAudioRecorderDelegate {
 
     @objc(updateRecorderProgress:)
     public func updateRecorderProgress(timer: Timer) -> Void {
-        if (audioRecorder != nil) {
+        if (audioRecorder != nil || self.isMP3Active) {
             var currentMetering: Float = 0
 
             if (_meteringEnabled) {
-                audioRecorder.updateMeters()
-                currentMetering = audioRecorder.averagePower(forChannel: 0)
+                if (self.isMP3Active) {
+                    currentMetering = self.meterLevel
+                } else {
+                    audioRecorder.updateMeters()
+                    currentMetering = audioRecorder.averagePower(forChannel: 0)
+                }
             }
 
             let status = [
-                "isRecording": audioRecorder.isRecording,
-                "currentPosition": audioRecorder.currentTime * 1000,
+                "isRecording": self.isMP3Active || audioRecorder.isRecording,
+                "currentPosition": (self.isMP3Active ? currentTime() : audioRecorder.currentTime) * 1000,
                 "currentMetering": currentMetering,
             ] as [String : Any];
 
@@ -137,9 +151,9 @@ class RNAudioRecorderPlayer: RCTEventEmitter, AVAudioRecorderDelegate {
     func startRecorder(path: String,  audioSets: [String: Any], meteringEnabled: Bool, resolve: @escaping RCTPromiseResolveBlock,
        rejecter reject: @escaping RCTPromiseRejectBlock) -> Void {
 
-        _meteringEnabled = meteringEnabled;
+        _meteringEnabled = meteringEnabled
 
-        let encoding = audioSets["AVFormatIDKeyIOS"] as? String
+        let encoding = audioSets["AVFormatIDKeyIOS"] as? String ?? "mp3"
         let mode = audioSets["AVModeIOS"] as? String
         let avLPCMBitDepth = audioSets["AVLinearPCMBitDepthKeyIOS"] as? Int
         let avLPCMIsBigEndian = audioSets["AVLinearPCMIsBigEndianKeyIOS"] as? Bool
@@ -152,10 +166,10 @@ class RNAudioRecorderPlayer: RCTEventEmitter, AVAudioRecorderDelegate {
         var numberOfChannel = audioSets["AVNumberOfChannelsKeyIOS"] as? Int
         var audioQuality = audioSets["AVEncoderAudioQualityKeyIOS"] as? Int
 
-        setAudioFileURL(path: path)
+        setAudioFileURL(path: path, isMp3: encoding == "mp3")
 
         if (sampleRate == nil) {
-            sampleRate = 44100;
+            sampleRate = 44100
         }
 
         if (encoding == nil) {
@@ -220,11 +234,15 @@ class RNAudioRecorderPlayer: RCTEventEmitter, AVAudioRecorderDelegate {
         if (numberOfChannel == nil) {
             numberOfChannel = 2
         }
+        
+        if encoding == "mp3" {
+            numberOfChannel = 1
+        }
 
         if (audioQuality == nil) {
             audioQuality = AVAudioQuality.medium.rawValue
         }
-
+        
         func startRecording() {
             let settings = [
                 AVSampleRateKey: sampleRate!,
@@ -262,6 +280,50 @@ class RNAudioRecorderPlayer: RCTEventEmitter, AVAudioRecorderDelegate {
                 reject("RNAudioPlayerRecorder", "Error occured during recording", nil)
             }
         }
+        
+        func startRecordingMp3() {
+            self.audioEngine = AVAudioEngine()
+            self.mixer = AVAudioMixerNode()
+            self.audioEngine.attach(mixer)
+            
+            let inputFormat = self.audioEngine.inputNode.outputFormat(forBus: 0)
+            let outputFormat = AVAudioFormat(commonFormat: AVAudioCommonFormat.pcmFormatInt16,
+                                       sampleRate: Double(sampleRate ?? 44100),
+                                       channels: UInt32(numberOfChannel ?? 1),
+                                       interleaved: true)!
+            let converter = AVAudioConverter(from:  inputFormat, to: outputFormat)!
+            
+            self.audioEngine.connect(self.audioEngine.inputNode, to: self.mixer, format: inputFormat)
+            self.mixer.volume = 0
+            self.audioEngine.connect(self.mixer, to: self.audioEngine.mainMixerNode, format: inputFormat)
+            let wavPath = audioFileURL!.absoluteString.replacingOccurrences(of: "mp3", with: "wav").replacingOccurrences(of: "file://", with: "")
+            
+            _ = ExtAudioFileCreateWithURL(URL(fileURLWithPath: wavPath) as CFURL, kAudioFileWAVEType, (inputFormat.streamDescription), nil, AudioFileFlags.eraseFile.rawValue, &outref)
+
+            self.mixer.installTap(onBus: 0, bufferSize: 1024, format: inputFormat, block: { (buffer: AVAudioPCMBuffer!, time: AVAudioTime!) -> Void in
+                let convertedBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: AVAudioFrameCount(outputFormat.sampleRate) * buffer.frameLength / AVAudioFrameCount(buffer.format.sampleRate))!
+                try? converter.convert(to: convertedBuffer, from: buffer)
+                
+                
+                _ = ExtAudioFileWrite(self.outref!, convertedBuffer.frameLength, convertedBuffer.audioBufferList)
+                if self._meteringEnabled {
+                    self.updateMeters(buffer)
+                }
+            })
+            
+            do {
+                self.audioEngine.prepare()
+                try self.audioEngine.start()
+                startTime = Date()
+                
+                mp3Rec(wavPath: wavPath, sampleRate: sampleRate ?? 44100, rate: Int32(audioQuality ?? 128))
+                startRecorderTimer()
+                resolve(audioFileURL?.absoluteString)
+                return
+            } catch {
+                reject("RNAudioPlayerRecorder", "Error occured during recording", nil)
+            }
+        }
 
         audioSession = AVAudioSession.sharedInstance()
 
@@ -272,7 +334,11 @@ class RNAudioRecorderPlayer: RCTEventEmitter, AVAudioRecorderDelegate {
             audioSession.requestRecordPermission { granted in
                 DispatchQueue.main.async {
                     if granted {
-                        startRecording()
+                        if encoding == "mp3" {
+                            startRecordingMp3()
+                        } else {
+                            startRecording()
+                        }
                     } else {
                         reject("RNAudioPlayerRecorder", "Record permission not granted", nil)
                     }
@@ -288,17 +354,30 @@ class RNAudioRecorderPlayer: RCTEventEmitter, AVAudioRecorderDelegate {
         resolve: @escaping RCTPromiseResolveBlock,
         rejecter reject: @escaping RCTPromiseRejectBlock
     ) -> Void {
-        if (audioRecorder == nil) {
+        if (audioRecorder == nil && !self.isMP3Active) {
             reject("RNAudioPlayerRecorder", "Failed to stop recorder. It is already nil.", nil)
             return
         }
 
-        audioRecorder.stop()
+        if audioRecorder != nil {
+            audioRecorder.stop()
+        }
+        
+        if self.isMP3Active {
+            self.audioEngine.stop()
+            self.mixer.removeTap(onBus: 0)
+            self.stopMP3Rec()
+            ExtAudioFileDispose(self.outref!)
+            let wavPath = self.audioFileURL!.absoluteString.replacingOccurrences(of: "mp3", with: "wav").replacingOccurrences(of: "file://", with: "")
+            try? FileManager.default.removeItem(at: URL(fileURLWithPath: wavPath))
+        }
 
         if (recordTimer != nil) {
             recordTimer!.invalidate()
             recordTimer = nil
         }
+        
+        try? audioSession.setActive(false)
 
         resolve(audioFileURL?.absoluteString)
     }
@@ -351,7 +430,7 @@ class RNAudioRecorderPlayer: RCTEventEmitter, AVAudioRecorderDelegate {
             reject("RNAudioPlayerRecorder", "Failed to play", nil)
         }
 
-        setAudioFileURL(path: path)
+        setAudioFileURL(path: path, isMp3: true)
         audioPlayerAsset = AVURLAsset(url: audioFileURL!, options:["AVURLAssetHTTPHeaderFieldsKey": httpHeaders])
         audioPlayerItem = AVPlayerItem(asset: audioPlayerAsset!)
 
@@ -430,5 +509,83 @@ class RNAudioRecorderPlayer: RCTEventEmitter, AVAudioRecorderDelegate {
     ) -> Void {
         audioPlayer.volume = volume
         resolve(volume)
+    }
+    
+    private func currentTime() -> TimeInterval {
+        if let start = startTime {
+            return Date().timeIntervalSince(start)
+        }
+        return 0
+    }
+    
+    private func updateMeters(_ buffer: AVAudioPCMBuffer) {
+        guard let channelData = buffer.floatChannelData else { return }
+        let channelDataValue = channelData.pointee
+        let channelDataValueArray = stride(from: 0, to: Int(buffer.frameLength), by: buffer.stride).map { channelDataValue[$0] }
+        
+        let rms = sqrt(channelDataValueArray.map {
+            return $0 * $0
+        }
+            .reduce(0, +) / Float(buffer.frameLength))
+        
+        let avgPower = 20 * log10(rms)
+        DispatchQueue.main.async {
+            self.meterLevel = avgPower
+        }
+    }
+    
+    private func mp3Rec(wavPath: String, sampleRate: Int, rate: Int32) {
+        self.isMP3Active = true
+        var total = 0
+        var read = 0
+        var write: Int32 = 0
+        
+        var pcm: UnsafeMutablePointer<FILE> = fopen(wavPath, "rb")
+        fseek(pcm, 4*1024, SEEK_CUR)
+        
+        let mp3Path = wavPath.replacingOccurrences(of: "wav", with: "mp3")
+        let mp3: UnsafeMutablePointer<FILE> = fopen(mp3Path, "wb")
+        let PCM_SIZE: Int = 8192
+        let MP3_SIZE: Int32 = 8192
+        let pcmbuffer = UnsafeMutablePointer<Int16>.allocate(capacity: Int(PCM_SIZE*2))
+        let mp3buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: Int(MP3_SIZE))
+        
+        let lame = lame_init()
+        lame_set_num_channels(lame, 1)
+        lame_set_mode(lame, MONO)
+        lame_set_in_samplerate(lame, Int32(sampleRate))
+        lame_set_out_samplerate(lame, 0) // which means LAME picks best value
+        lame_set_quality(lame, 4); // normal quality, quite fast encoding
+        lame_set_brate(lame, rate)
+        lame_set_VBR(lame, vbr_off)
+        lame_init_params(lame)
+        
+        DispatchQueue.global(qos: .default).async {
+            while true {
+                pcm = fopen(wavPath, "rb")
+                fseek(pcm, 4*1024 + total, SEEK_CUR)
+                read = fread(pcmbuffer, MemoryLayout<Int16>.size, PCM_SIZE, pcm)
+                if read != 0 {
+                    write = lame_encode_buffer(lame, pcmbuffer, nil, Int32(read), mp3buffer, MP3_SIZE)
+                    fwrite(mp3buffer, Int(write), 1, mp3)
+                    total += read * MemoryLayout<Int16>.size
+                    fclose(pcm)
+                } else if !self.isMP3Active {
+                    _ = lame_encode_flush(lame, mp3buffer, MP3_SIZE)
+                    _ = fwrite(mp3buffer, Int(write), 1, mp3)
+                    break
+                } else {
+                    fclose(pcm)
+                    usleep(50)
+                }
+            }
+            lame_close(lame)
+            fclose(mp3)
+            fclose(pcm)
+        }
+    }
+    
+    private func stopMP3Rec() {
+        self.isMP3Active = false
     }
 }

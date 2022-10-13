@@ -48,6 +48,7 @@ repositories {
 dependencies {
   implementation 'com.facebook.react:react-native:+'
   implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk7:${project.ext.kotlinVersion}"
+  implementation 'com.github.naman14:TAndroidLame:1.1'
 
   def supportLibVersion = safeExtGet('supportLibVersion', safeExtGet('supportVersion', null))
   def androidXVersion = safeExtGet('androidXVersion', null)
@@ -63,6 +64,5 @@ dependencies {
     def androidXBrowser = safeExtGet('androidXBrowser', androidXVersion)
     implementation "androidx.annotation:annotation:$androidXAnnotation"
     implementation "androidx.browser:browser:$androidXBrowser"
-    implementation 'com.github.naman14:TAndroidLame:1.1'
   }
 }
